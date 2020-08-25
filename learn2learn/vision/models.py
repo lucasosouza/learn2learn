@@ -168,6 +168,28 @@ class OmniglotFC(nn.Sequential):
         return super(OmniglotFC, self).forward(x.view(-1, self.input_size))
 
 
+class OmniglotFCOML(nn.Sequential):
+    """
+    Adaptation for OML
+    """
+
+    def __init__(self, input_size, output_size, sizes=None):
+        if sizes is None:
+            sizes = [256, 128, 64, 64]
+        layers = [LinearBlock(input_size, sizes[0]), ]
+        for s_i, s_o in zip(sizes[:-1], sizes[1:]):
+            layers.append(LinearBlock(s_i, s_o))
+        # break down into features and adaptaion
+        self.features = nn.Sequential(*layers)
+        self.adaptation = fc_init_(nn.Linear(sizes[-1], output_size))
+
+        self.input_size = input_size
+
+    def forward(self, x):
+        x = self.features(x.view(-1, self.input_size))
+        x = self.adaptation(x)
+        return x
+
 class OmniglotCNN(nn.Module):
     """
 
@@ -213,6 +235,8 @@ class OmniglotCNN(nn.Module):
         x = x.mean(dim=[2, 3])
         x = self.linear(x)
         return x
+
+
 
 
 class MiniImagenetCNN(nn.Module):
