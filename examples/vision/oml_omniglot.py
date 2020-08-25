@@ -37,15 +37,25 @@ def fast_adapt(batch, learner, loss, adaptation_steps, shots, ways, device):
     for step in range(adaptation_steps):
         train_error = loss(learner(adaptation_data), adaptation_labels)
         train_error /= len(adaptation_data)
-        learner.adapt(train_error)
+        learner.adapt(train_error, freeze_feature_extraction=freeze_feature_extraction)
 
     # Evaluate the adapted model
     predictions = learner(evaluation_data)
     valid_error = loss(predictions, evaluation_labels)
     valid_error /= len(evaluation_data)
     valid_accuracy = accuracy(predictions, evaluation_labels)
-    return valid_error, valid_accuracy
+    return valid_error, valid_accuracy, evaluation_data, evaluation_labels
 
+def sample_random_set(batch, shots, ways, device):
+    data, labels = batch
+    data, labels = data.to(device), labels.to(device)
+
+    random_indices = np.zeros(data.size(0), dtype=bool)
+    random_indices[np.arange(shots*ways) * 2] = True
+    random_indices = torch.from_numpy(random_indices)
+    random_data, random_labels = data[random_indices], labels[random_indices]
+
+    return random_data, random_labels
 
 def main(
         ways=5,
@@ -77,7 +87,7 @@ def main(
     )
 
     # Create model
-    model = l2l.vision.models.OmniglotFC(28 ** 2, ways)
+    model = l2l.vision.models.OmniglotFCOML(28 ** 2, ways)
     model.to(device)
     maml = l2l.algorithms.MAML(model, lr=fast_lr, first_order=False)
     opt = optim.Adam(maml.parameters(), meta_lr)
@@ -89,31 +99,41 @@ def main(
         meta_train_accuracy = 0.0
         meta_valid_error = 0.0
         meta_valid_accuracy = 0.0
+
+        learner = maml.clone()
+        evaluation_data_all_tasks = []
+        evaluation_labels_all_tasks = []
+
         for task in range(meta_batch_size):
             # Compute meta-training loss
-            learner = maml.clone()
             batch = tasksets.train.sample()
-            evaluation_error, evaluation_accuracy = fast_adapt(batch,
-                                                               learner,
-                                                               loss,
-                                                               adaptation_steps,
-                                                               shots,
-                                                               ways,
-                                                               device)
-            evaluation_error.backward()
+            evaluation_error, evaluation_accuracy, evaluation_data, evaluation_labels = \
+                fast_adapt(batch,
+                          learner,
+                          loss,
+                          adaptation_steps,
+                          shots,
+                          ways,
+                          device,
+                          freeze_feature_extraction=True)
             meta_train_error += evaluation_error.item()
             meta_train_accuracy += evaluation_accuracy.item()
+
+            evaluation_data_all_tasks.append(evaluation_data)
+            evaluation_labels_all_tasks.append(evaluation_labels)
 
             # Compute meta-validation loss
             learner = maml.clone()
             batch = tasksets.validation.sample()
-            evaluation_error, evaluation_accuracy = fast_adapt(batch,
-                                                               learner,
-                                                               loss,
-                                                               adaptation_steps,
-                                                               shots,
-                                                               ways,
-                                                               device)
+            evaluation_error, evaluation_accuracy, _, _ = \
+                fast_adapt(batch,
+                           learner,
+                           loss,
+                           adaptation_steps,
+                           shots,
+                           ways,
+                           device,
+                           freeze_feature_extraction=True)
             meta_valid_error += evaluation_error.item()
             meta_valid_accuracy += evaluation_accuracy.item()
 
@@ -125,9 +145,18 @@ def main(
         print('Meta Valid Error', meta_valid_error / meta_batch_size)
         print('Meta Valid Accuracy', meta_valid_accuracy / meta_batch_size)
 
-        # Average the accumulated gradients and optimize
-        for p in maml.parameters():
-            p.grad.data.mul_(1.0 / meta_batch_size)
+        # sample remember/random set
+        random_batch = tasksets.train.sample()
+        random_data, random_labels = sample_random_set(
+            random_batch, shots, ways, device
+        )
+        # concatenate with trajectory
+        meta_training_test_data = torch.stack(evaluation_data_all_tasks, random_data)
+        meta_training_test_labels = torch.stack(evaluation_labels_all_tasks, random_labels)
+
+        # learn - outer loop
+        loss = loss(learner(meta_training_test_data), meta_training_test_labels)
+        loss.backward()
         opt.step()
 
     meta_test_error = 0.0
@@ -150,4 +179,4 @@ def main(
 
 
 if __name__ == '__main__':
-    main()
+    main(meta_batch_size=5, shots=5)

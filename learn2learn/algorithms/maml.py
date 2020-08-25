@@ -7,7 +7,7 @@ from learn2learn.algorithms.base_learner import BaseLearner
 from learn2learn.utils import clone_module, update_module
 
 
-def maml_update(model, lr, grads=None):
+def maml_update(model, lr, grads=None, freeze_feature_extraction=False):
     """
     [[Source]](https://github.com/learnables/learn2learn/blob/master/learn2learn/algorithms/maml.py)
 
@@ -36,7 +36,10 @@ def maml_update(model, lr, grads=None):
     ~~~
     """
     if grads is not None:
-        params = list(model.parameters())
+        if freeze_feature_extraction:
+            params = list(model.adaptation.parameters())
+        else:
+            params = list(model.parameters())
         if not len(grads) == len(list(params)):
             msg = 'WARNING:maml_update(): Parameters and gradients have different length. ('
             msg += str(len(params)) + ' vs ' + str(len(grads)) + ')'
@@ -44,6 +47,7 @@ def maml_update(model, lr, grads=None):
         for p, g in zip(params, grads):
             if g is not None:
                 p.update = - lr * g
+
     return update_module(model)
 
 
@@ -110,7 +114,8 @@ class MAML(BaseLearner):
               loss,
               first_order=None,
               allow_unused=None,
-              allow_nograd=None):
+              allow_nograd=None,
+              freeze_feature_extraction=False):
         """
         **Description**
 
@@ -135,9 +140,14 @@ class MAML(BaseLearner):
             allow_nograd = self.allow_nograd
         second_order = not first_order
 
+        if freeze_feature_extraction:
+            adaptation_params = self.module.adaptation.parameters()
+        else:
+            adaptation_params = self.module.parameters()
+
         if allow_nograd:
             # Compute relevant gradients
-            diff_params = [p for p in self.module.parameters() if p.requires_grad]
+            diff_params = [p for p in adaptation_params if p.requires_grad]
             grad_params = grad(loss,
                                diff_params,
                                retain_graph=second_order,
@@ -147,7 +157,7 @@ class MAML(BaseLearner):
             grad_counter = 0
 
             # Handles gradients for non-differentiable parameters
-            for param in self.module.parameters():
+            for param in adaptation_params:
                 if param.requires_grad:
                     gradient = grad_params[grad_counter]
                     grad_counter += 1
@@ -157,7 +167,7 @@ class MAML(BaseLearner):
         else:
             try:
                 gradients = grad(loss,
-                                 self.module.parameters(),
+                                 adaptation_params,
                                  retain_graph=second_order,
                                  create_graph=second_order,
                                  allow_unused=allow_unused)
@@ -166,7 +176,7 @@ class MAML(BaseLearner):
                 print('learn2learn: Maybe try with allow_nograd=True and/or allow_unused=True ?')
 
         # Update the module
-        self.module = maml_update(self.module, self.lr, gradients)
+        self.module = maml_update(self.module, self.lr, gradients, freeze_feature_extraction)
 
     def clone(self, first_order=None, allow_unused=None, allow_nograd=None):
         """
